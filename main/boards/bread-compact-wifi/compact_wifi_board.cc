@@ -6,7 +6,7 @@
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
-#include "lamp_controller.h"
+#include "esp32_camera.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
 
@@ -27,6 +27,7 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     Display* display_ = nullptr;
+    Esp32Camera* camera_ = nullptr;
     Button boot_button_;
     Button touch_button_;
     Button volume_up_button_;
@@ -147,10 +148,54 @@ private:
         });
     }
 
-    // 物联网初始化，逐步迁移到 MCP 协议
-    void InitializeTools() {
-        static LampController lamp(LAMP_GPIO);
+    void InitializeCamera() {
+    camera_config_t config = {};
+
+    config.pin_d0 = CAMERA_PIN_D0;
+    config.pin_d1 = CAMERA_PIN_D1;
+    config.pin_d2 = CAMERA_PIN_D2;
+    config.pin_d3 = CAMERA_PIN_D3;
+    config.pin_d4 = CAMERA_PIN_D4;
+    config.pin_d5 = CAMERA_PIN_D5;
+    config.pin_d6 = CAMERA_PIN_D6;
+    config.pin_d7 = CAMERA_PIN_D7;
+
+    config.pin_xclk = CAMERA_PIN_XCLK;
+    config.pin_pclk = CAMERA_PIN_PCLK;
+    config.pin_vsync = CAMERA_PIN_VSYNC;
+    config.pin_href = CAMERA_PIN_HREF;
+
+    config.pin_sccb_sda = CAMERA_PIN_SIOD;
+    config.pin_sccb_scl = CAMERA_PIN_SIOC;
+    config.sccb_i2c_port = 0;
+
+    config.pin_pwdn = CAMERA_PIN_PWDN;
+    config.pin_reset = CAMERA_PIN_RESET;
+    config.xclk_freq_hz = XCLK_FREQ_HZ;
+
+    config.pixel_format = PIXFORMAT_RGB565;
+    config.frame_size = FRAMESIZE_VGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+
+    camera_ = new Esp32Camera(config);
+
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb != nullptr) {
+        ESP_LOGI(TAG,
+                 "Camera smoke test OK: %dx%d, len=%zu, format=%d",
+                 fb->width,
+                 fb->height,
+                 fb->len,
+                 fb->format);
+        esp_camera_fb_return(fb);
+    } else {
+        ESP_LOGE(TAG,
+                 "Camera smoke test FAILED: esp_camera_fb_get() returned nullptr");
     }
+}
 
 public:
     CompactWifiBoard() :
@@ -161,7 +206,7 @@ public:
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
-        InitializeTools();
+        InitializeCamera();
     }
 
     virtual Led* GetLed() override {
@@ -183,6 +228,9 @@ public:
     virtual Display* GetDisplay() override {
         return display_;
     }
+    virtual Camera* GetCamera() override {
+    return camera_;
+}
 };
 
 DECLARE_BOARD(CompactWifiBoard);
