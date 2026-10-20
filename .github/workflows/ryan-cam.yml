@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - ryan-cam-test
+      - ryan-cam-snapshot
   workflow_dispatch:
 
 permissions:
@@ -11,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.name }}
+    name: Build ${{ matrix.artifact }}
     runs-on: ubuntu-latest
 
     container:
@@ -20,9 +21,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        name:
-          - bread-compact-wifi
-          - bread-compact-wifi-128x64
+        # ryan-cam-snapshot test builds (OLED 128x32). Artifact names differ from the
+        # stable ryan-cam-test artifacts so both can be kept for rollback.
+        include:
+          # Stage 1 only: frame buffer lifecycle fix, /snapshot disabled (default config)
+          - config: config.json
+            artifact: ryan-cam-snapshot-stage1-bread-compact-wifi
+          # Stage 1 + 2: /snapshot enabled on port 8080
+          - config: config.snapshot-test.json
+            artifact: ryan-cam-snapshot-http-bread-compact-wifi
 
     steps:
       - name: Checkout
@@ -32,11 +39,11 @@ jobs:
         shell: bash
         run: |
           source $IDF_PATH/export.sh
-          python scripts/build.py bread-compact-wifi --name ${{ matrix.name }}
+          python scripts/build.py bread-compact-wifi -c ${{ matrix.config }} --name bread-compact-wifi
 
       - name: Upload firmware
         uses: actions/upload-artifact@v7
         with:
-          name: ryan-cam-${{ matrix.name }}
+          name: ${{ matrix.artifact }}
           path: build/merged-binary.bin
           if-no-files-found: error

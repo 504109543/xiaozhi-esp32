@@ -7,6 +7,9 @@
 #include "config.h"
 #include "mcp_server.h"
 #include "esp32_camera.h"
+#if CONFIG_XIAOZHI_CAMERA_SNAPSHOT_SERVER
+#include "camera_snapshot_server.h"
+#endif
 #include "led/single_led.h"
 #include "assets/lang_config.h"
 
@@ -231,6 +234,14 @@ public:
     virtual Camera* GetCamera() override {
     return camera_;
 }
+
+    virtual void StartNetwork() override {
+        WifiBoard::StartNetwork();
+#if CONFIG_XIAOZHI_CAMERA_SNAPSHOT_SERVER
+        // Listens on all interfaces, requests are served once Wi-Fi has an IP
+        CameraSnapshotServer::GetInstance().Start(camera_);
+#endif
+    }
 };
 
 DECLARE_BOARD(CompactWifiBoard);

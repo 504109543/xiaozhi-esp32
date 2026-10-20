@@ -1115,6 +1115,35 @@ menu "Camera Configuration"
             comment "For 180° rotation, use HFlip + VFlip instead of this option"
         endchoice
     endif
+
+    menuconfig XIAOZHI_CAMERA_SNAPSHOT_SERVER
+        bool "Enable HTTP Camera Snapshot (/snapshot)"
+        default n
+        depends on IDF_TARGET_ESP32S3
+        help
+            Serve GET /snapshot on the local network, returning one JPEG from the
+            already initialized esp32-camera (Esp32Camera boards only).
+            AI photo capture has priority; snapshot requests get 503 while it is busy.
+            The endpoint has no TLS. Only enable it on a trusted LAN.
+
+    if XIAOZHI_CAMERA_SNAPSHOT_SERVER
+        config XIAOZHI_CAMERA_SNAPSHOT_PORT
+            int "Snapshot HTTP Port"
+            default 8080
+            range 1 65535
+
+        config XIAOZHI_CAMERA_SNAPSHOT_JPEG_QUALITY
+            int "Snapshot JPEG Quality"
+            default 45
+            range 1 100
+
+        config XIAOZHI_CAMERA_SNAPSHOT_TOKEN
+            string "Snapshot Access Token"
+            default ""
+            help
+                When set, requests must pass ?token=<value>. Empty disables the check.
+                The value is compiled into the firmware, do not commit a real token.
+    endif
 endmenu
 
 menu "TAIJIPAI_S3_CONFIG"

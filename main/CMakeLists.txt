@@ -1063,9 +1063,17 @@ endif()
 # Include Esp32Camera if target is ESP32S3
 if(CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND SOURCES "boards/common/esp32_camera.cc")
+    if(CONFIG_XIAOZHI_CAMERA_SNAPSHOT_SERVER)
+        list(APPEND SOURCES "boards/common/camera_snapshot_server.cc")
+    endif()
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
+if(CONFIG_XIAOZHI_CAMERA_SNAPSHOT_SERVER)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+        esp_http_server
+    )
+endif()
 if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
         m5stack__m5pm1
