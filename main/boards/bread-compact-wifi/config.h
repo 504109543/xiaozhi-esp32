@@ -3,6 +3,15 @@
 
 #include <driver/gpio.h>
 
+// Wi-Fi latency A/B switches. Defaults keep the ryan-cam-test behavior;
+// the ryan-wifi-ab workflow overrides them per build variant.
+#ifndef RYAN_AB_ENABLE_CAMERA
+#define RYAN_AB_ENABLE_CAMERA 1
+#endif
+#ifndef RYAN_AB_WIFI_ALWAYS_PERFORMANCE
+#define RYAN_AB_WIFI_ALWAYS_PERFORMANCE 0
+#endif
+
 #define AUDIO_INPUT_SAMPLE_RATE  16000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
 

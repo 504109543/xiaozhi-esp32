@@ -206,7 +206,11 @@ public:
         InitializeDisplayI2c();
         InitializeSsd1306Display();
         InitializeButtons();
+#if RYAN_AB_ENABLE_CAMERA
         InitializeCamera();
+#else
+        ESP_LOGW(TAG, "Wi-Fi A/B build: camera disabled");
+#endif
     }
 
     virtual Led* GetLed() override {
@@ -228,6 +232,13 @@ public:
     virtual Display* GetDisplay() override {
         return display_;
     }
+#if RYAN_AB_WIFI_ALWAYS_PERFORMANCE
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        (void)level;
+        WifiBoard::SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    }
+#endif
+
     virtual Camera* GetCamera() override {
     return camera_;
 }
