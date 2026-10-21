@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -45,8 +46,14 @@ public:
     };
 
 private:
-    bool streaming_on_ = false;
+    camera_config_t config_;
+    bool available_ = false;     // Sensor was detected at boot
+    bool streaming_on_ = false;  // Driver is running and writing frames into PSRAM
     bool swap_bytes_enabled_ = true;  // Swap pixel byte order for RGB565, enabled by default
+    int8_t hmirror_ = -1;             // Runtime mirror/flip overrides, -1 = not set
+    int8_t vflip_ = -1;
+    esp_timer_handle_t idle_timer_ = nullptr;
+    int64_t last_use_us_ = 0;
     std::string explain_url_;
     std::string explain_token_;
     std::thread encoder_thread_;
@@ -64,6 +71,12 @@ private:
     bool has_frame_ = false;
 
     camera_fb_t* GrabLatestFrame();
+    // Caller must hold fb_mutex_
+    bool StartLocked();
+    void StopLocked();
+    void ApplySensorSettings();
+    void ArmIdleStop();
+    void StopIfIdle();
 
 public:
     Esp32Camera(const camera_config_t& config);

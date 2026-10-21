@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "application.h"
 #include "board.h"
 #include "display.h"
 #include "esp32_camera.h"
@@ -28,6 +29,10 @@ static constexpr bool kConfiguredVFlip = true;
 #else
 static constexpr bool kConfiguredVFlip = false;
 #endif
+#endif
+
+#if !CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+#define CONFIG_XIAOZHI_CAMERA_IDLE_STOP_MS 0
 #endif
 
 // Bytes of pixel data in a frame buffer
@@ -77,36 +82,53 @@ static bool ToV4l2Format(pixformat_t format, v4l2_pix_fmt_t* out) {
     }
 }
 
-Esp32Camera::Esp32Camera(const camera_config_t& config) {
-    esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_camera_init failed with error 0x%x", err);
+Esp32Camera::Esp32Camera(const camera_config_t& config) : config_(config) {
+    std::lock_guard<std::mutex> lock(fb_mutex_);
+    if (!StartLocked()) {
         return;
     }
+    available_ = true;
 
-    sensor_t* s = esp_camera_sensor_get();
-    if (s) {
-        if (s->id.PID == GC0308_PID) {
-            s->set_hmirror(s, 0);  // Control camera mirror: 1 for mirror, 0 for normal
-        }
-#if CONFIG_XIAOZHI_CAMERA_MIRROR_CONFIGURED
-        s->set_hmirror(s, kConfiguredHMirror ? 1 : 0);
-        s->set_vflip(s, kConfiguredVFlip ? 1 : 0);
-#endif
-        ESP_LOGI(TAG, "Camera initialized: format=%d", config.pixel_format);
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+    // The sensor was probed by StartLocked(); stop the driver until the first capture
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb != nullptr) {
+        ESP_LOGI(TAG, "Camera probe OK: %dx%d, len=%zu, format=%d", fb->width, fb->height,
+                 fb->len, fb->format);
+        esp_camera_fb_return(fb);
+    } else {
+        ESP_LOGE(TAG, "Camera probe: esp_camera_fb_get() returned nullptr");
     }
+    StopLocked();
 
-    streaming_on_ = true;
+    esp_timer_create_args_t timer_args = {
+        .callback =
+            [](void* arg) {
+                // Driver teardown blocks briefly, run it on the main task instead of esp_timer
+                auto camera = static_cast<Esp32Camera*>(arg);
+                Application::GetInstance().Schedule([camera]() { camera->StopIfIdle(); });
+            },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "camera_idle",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&timer_args, &idle_timer_);
+#endif
 }
 
 Esp32Camera::~Esp32Camera() {
+    if (idle_timer_) {
+        esp_timer_stop(idle_timer_);
+        esp_timer_delete(idle_timer_);
+        idle_timer_ = nullptr;
+    }
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
-    if (streaming_on_) {
+    {
         std::lock_guard<std::mutex> lock(fb_mutex_);
-        esp_camera_deinit();
-        streaming_on_ = false;
+        StopLocked();
     }
     if (encode_buf_) {
         heap_caps_free(encode_buf_);
@@ -114,6 +136,93 @@ Esp32Camera::~Esp32Camera() {
         encode_buf_size_ = 0;
     }
     has_frame_ = false;
+}
+
+bool Esp32Camera::StartLocked() {
+    if (streaming_on_) {
+        return true;
+    }
+    int64_t start_time = esp_timer_get_time();
+    esp_err_t err = esp_camera_init(&config_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_camera_init failed with error 0x%x", err);
+        return false;
+    }
+    streaming_on_ = true;
+    ApplySensorSettings();
+
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+    // Let auto exposure and white balance settle on a freshly started sensor
+    if (available_) {
+        for (int i = 0; i < CONFIG_XIAOZHI_CAMERA_WARMUP_FRAMES; i++) {
+            camera_fb_t* fb = esp_camera_fb_get();
+            if (!fb) {
+                ESP_LOGE(TAG, "Camera warm-up frame %d failed", i);
+                StopLocked();
+                return false;
+            }
+            esp_camera_fb_return(fb);
+        }
+    }
+#endif
+    ESP_LOGI(TAG, "Camera started: format=%d, start time: %d ms", config_.pixel_format,
+             int((esp_timer_get_time() - start_time) / 1000));
+    return true;
+}
+
+void Esp32Camera::StopLocked() {
+    if (!streaming_on_) {
+        return;
+    }
+    esp_camera_deinit();
+    streaming_on_ = false;
+    ESP_LOGI(TAG, "Camera stopped");
+}
+
+void Esp32Camera::ApplySensorSettings() {
+    sensor_t* s = esp_camera_sensor_get();
+    if (!s) {
+        return;
+    }
+    if (s->id.PID == GC0308_PID) {
+        s->set_hmirror(s, 0);  // Control camera mirror: 1 for mirror, 0 for normal
+    }
+#if CONFIG_XIAOZHI_CAMERA_MIRROR_CONFIGURED
+    s->set_hmirror(s, kConfiguredHMirror ? 1 : 0);
+    s->set_vflip(s, kConfiguredVFlip ? 1 : 0);
+#endif
+    if (hmirror_ >= 0) {
+        s->set_hmirror(s, hmirror_);
+    }
+    if (vflip_ >= 0) {
+        s->set_vflip(s, vflip_);
+    }
+}
+
+// Keep the driver running for repeated snapshots, stop it once they stop coming
+void Esp32Camera::ArmIdleStop() {
+    last_use_us_ = esp_timer_get_time();
+    if (idle_timer_ == nullptr || CONFIG_XIAOZHI_CAMERA_IDLE_STOP_MS == 0) {
+        StopLocked();
+        return;
+    }
+    esp_timer_stop(idle_timer_);
+    esp_timer_start_once(idle_timer_, CONFIG_XIAOZHI_CAMERA_IDLE_STOP_MS * 1000LL);
+}
+
+void Esp32Camera::StopIfIdle() {
+    std::unique_lock<std::mutex> lock(fb_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        // A capture is in progress, it re-arms or stops the driver itself
+        return;
+    }
+    int64_t idle_us = esp_timer_get_time() - last_use_us_;
+    int64_t timeout_us = CONFIG_XIAOZHI_CAMERA_IDLE_STOP_MS * 1000LL;
+    if (streaming_on_ && idle_us < timeout_us) {
+        esp_timer_start_once(idle_timer_, timeout_us - idle_us);
+        return;
+    }
+    StopLocked();
 }
 
 // Get the latest frame, discard old frames for real-time performance.
@@ -143,7 +252,7 @@ bool Esp32Camera::Capture() {
     }
     has_frame_ = false;
 
-    if (!streaming_on_) {
+    if (!available_) {
         return false;
     }
 
@@ -153,9 +262,15 @@ bool Esp32Camera::Capture() {
     std::unique_lock<std::mutex> lock(fb_mutex_);
     ai_capture_waiters_.fetch_sub(1);
 
+    if (!StartLocked()) {
+        return false;
+    }
     camera_fb_t* fb = GrabLatestFrame();
     if (!fb) {
         ESP_LOGE(TAG, "Camera capture failed");
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+        StopLocked();
+#endif
         return false;
     }
 
@@ -171,6 +286,9 @@ bool Esp32Camera::Capture() {
             ESP_LOGE(TAG, "Failed to allocate memory for encode buffer");
             encode_buf_size_ = 0;
             esp_camera_fb_return(fb);
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+            StopLocked();
+#endif
             return false;
         }
         encode_buf_size_ = data_size;
@@ -184,6 +302,10 @@ bool Esp32Camera::Capture() {
     frame_height_ = fb->height;
     frame_format_ = fb->format;
     esp_camera_fb_return(fb);
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+    // AI capture is one-shot: stop now so the spoken reply gets the full Wi-Fi link
+    StopLocked();
+#endif
     lock.unlock();
     int64_t grab_time = esp_timer_get_time() - start_time;
 
@@ -215,20 +337,27 @@ bool Esp32Camera::Capture() {
 }
 
 bool Esp32Camera::SetHMirror(bool enabled) {
-    sensor_t* s = esp_camera_sensor_get();
-    if (!s) {
+    std::lock_guard<std::mutex> lock(fb_mutex_);
+    if (!available_) {
         return false;
     }
-    s->set_hmirror(s, enabled ? 1 : 0);
+    // Remembered so it is applied again whenever the driver is restarted
+    hmirror_ = enabled ? 1 : 0;
+    if (sensor_t* s = esp_camera_sensor_get()) {
+        s->set_hmirror(s, hmirror_);
+    }
     return true;
 }
 
 bool Esp32Camera::SetVFlip(bool enabled) {
-    sensor_t* s = esp_camera_sensor_get();
-    if (!s) {
+    std::lock_guard<std::mutex> lock(fb_mutex_);
+    if (!available_) {
         return false;
     }
-    s->set_vflip(s, enabled ? 1 : 0);
+    vflip_ = enabled ? 1 : 0;
+    if (sensor_t* s = esp_camera_sensor_get()) {
+        s->set_vflip(s, vflip_);
+    }
     return true;
 }
 
@@ -430,7 +559,7 @@ std::expected<std::string, std::string> Esp32Camera::Explain(const std::string& 
 
 std::expected<Esp32Camera::JpegSnapshot, Esp32Camera::SnapshotError> Esp32Camera::CaptureSnapshotJpeg(
     uint8_t quality) {
-    if (!streaming_on_) {
+    if (!available_) {
         return std::unexpected(SnapshotError::kNotReady);
     }
     // Never make an AI capture wait behind a snapshot that has not started yet
@@ -443,9 +572,15 @@ std::expected<Esp32Camera::JpegSnapshot, Esp32Camera::SnapshotError> Esp32Camera
     }
 
     int64_t start_time = esp_timer_get_time();
+    if (!StartLocked()) {
+        return std::unexpected(SnapshotError::kCaptureFailed);
+    }
     camera_fb_t* fb = GrabLatestFrame();
     if (!fb) {
         ESP_LOGE(TAG, "Snapshot capture failed");
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+        StopLocked();
+#endif
         return std::unexpected(SnapshotError::kCaptureFailed);
     }
 
@@ -459,11 +594,17 @@ std::expected<Esp32Camera::JpegSnapshot, Esp32Camera::SnapshotError> Esp32Camera
         (uint8_t*)heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!frame) {
         esp_camera_fb_return(fb);
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+        ArmIdleStop();
+#endif
         ESP_LOGE(TAG, "Failed to allocate %zu bytes for snapshot frame", data_size);
         return std::unexpected(SnapshotError::kNoMemory);
     }
     CopyFrame(fb, frame.get(), data_size, swap_bytes_enabled_);
     esp_camera_fb_return(fb);
+#if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+    ArmIdleStop();
+#endif
     lock.unlock();
 
     int64_t copied_time = esp_timer_get_time();

@@ -5,6 +5,7 @@ on:
     branches:
       - ryan-cam-test
       - ryan-cam-snapshot
+      - ryan-cam-ondemand
   workflow_dispatch:
 
 permissions:
@@ -26,10 +27,10 @@ jobs:
         include:
           # Stage 1 only: frame buffer lifecycle fix, /snapshot disabled (default config)
           - config: config.json
-            artifact: ryan-cam-snapshot-stage1-bread-compact-wifi
+            artifact: stage1-bread-compact-wifi
           # Stage 1 + 2: /snapshot enabled on port 8080
           - config: config.snapshot-test.json
-            artifact: ryan-cam-snapshot-http-bread-compact-wifi
+            artifact: http-bread-compact-wifi
 
     steps:
       - name: Checkout
@@ -44,6 +45,6 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ github.ref_name }}-${{ matrix.artifact }}
           path: build/merged-binary.bin
           if-no-files-found: error

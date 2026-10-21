@@ -649,6 +649,13 @@ choice XIAOZHI_NETWORK_TYPE
             Use the onboard Ethernet port for network access.
 endchoice
 
+config XIAOZHI_WIFI_ALWAYS_PERFORMANCE
+    bool "Keep Wi-Fi in performance mode (disable power save)"
+    default n
+    help
+        Ignore requests to enter Wi-Fi power save. Idle ping drops from roughly
+        DTIM interval (hundreds of ms) to a few ms, at the cost of higher idle power.
+
 menu "Ethernet Configuration"
     depends on XIAOZHI_NETWORK_ETHERNET
 
@@ -1114,6 +1121,31 @@ menu "Camera Configuration"
                 bool "270°"
             comment "For 180° rotation, use HFlip + VFlip instead of this option"
         endchoice
+    endif
+
+    menuconfig XIAOZHI_CAMERA_ON_DEMAND
+        bool "Run the camera driver only while capturing"
+        default n
+        depends on IDF_TARGET_ESP32S3
+        help
+            Esp32Camera probes the sensor at boot and then stops the driver. It is started
+            again for each capture. A running driver keeps writing frames into PSRAM over DMA,
+            which can starve Wi-Fi (seconds of ping latency observed with RGB565 VGA).
+            AI capture stops the driver right after the frame is copied; snapshot requests
+            keep it running until it has been idle for XIAOZHI_CAMERA_IDLE_STOP_MS.
+
+    if XIAOZHI_CAMERA_ON_DEMAND
+        config XIAOZHI_CAMERA_WARMUP_FRAMES
+            int "Frames to discard after starting the driver"
+            default 3
+            range 0 30
+            help
+                Lets auto exposure and white balance settle before the frame is used.
+
+        config XIAOZHI_CAMERA_IDLE_STOP_MS
+            int "Stop the driver after snapshot idle time (ms)"
+            default 5000
+            range 0 600000
     endif
 
     menuconfig XIAOZHI_CAMERA_SNAPSHOT_SERVER

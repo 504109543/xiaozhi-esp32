@@ -280,6 +280,9 @@ std::string WifiBoard::GetBoardJson() {
 }
 
 void WifiBoard::SetPowerSaveLevel(PowerSaveLevel level) {
+#if CONFIG_XIAOZHI_WIFI_ALWAYS_PERFORMANCE
+    level = PowerSaveLevel::PERFORMANCE;
+#endif
     WifiPowerSaveLevel wifi_level;
     switch (level) {
         case PowerSaveLevel::LOW_POWER:

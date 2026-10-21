@@ -185,6 +185,8 @@ private:
 
     camera_ = new Esp32Camera(config);
 
+#if !CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+    // In on-demand mode the driver is already stopped; Esp32Camera probes the sensor itself
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb != nullptr) {
         ESP_LOGI(TAG,
@@ -198,6 +200,7 @@ private:
         ESP_LOGE(TAG,
                  "Camera smoke test FAILED: esp_camera_fb_get() returned nullptr");
     }
+#endif
 }
 
 public:
