@@ -1156,6 +1156,7 @@ menu "Camera Configuration"
             Serve GET /snapshot on the local network, returning one JPEG from the
             already initialized esp32-camera (Esp32Camera boards only).
             AI photo capture has priority; snapshot requests get 503 while it is busy.
+            Requests need the access token (see XIAOZHI_CAMERA_SNAPSHOT_TOKEN).
             The endpoint has no TLS. Only enable it on a trusted LAN.
 
     if XIAOZHI_CAMERA_SNAPSHOT_SERVER
@@ -1170,11 +1171,38 @@ menu "Camera Configuration"
             range 1 100
 
         config XIAOZHI_CAMERA_SNAPSHOT_TOKEN
-            string "Snapshot Access Token"
+            string "Access Token Override"
             default ""
             help
-                When set, requests must pass ?token=<value>. Empty disables the check.
-                The value is compiled into the firmware, do not commit a real token.
+                Requests must pass ?token=<value> or "Authorization: Bearer <value>".
+                When empty, a random token is generated on first boot, stored in NVS
+                (namespace camera, key http_token) and printed to the serial log at boot.
+                A value set here is compiled into the firmware, do not commit a real token.
+
+        menuconfig XIAOZHI_CAMERA_STREAM
+            bool "Enable MJPEG Stream (/stream)"
+            default y
+            help
+                GET /stream serves multipart/x-mixed-replace MJPEG, one client at a time.
+                The driver runs in sensor JPEG mode while a client is connected and is
+                stopped (on-demand mode) when it disconnects. AI capture pauses the stream.
+
+        if XIAOZHI_CAMERA_STREAM
+            config XIAOZHI_CAMERA_STREAM_DEFAULT_FPS
+                int "Default stream frame rate"
+                default 5
+                range 1 25
+
+            config XIAOZHI_CAMERA_STREAM_MAX_FPS
+                int "Maximum stream frame rate (?fps=)"
+                default 10
+                range 1 25
+
+            config XIAOZHI_CAMERA_STREAM_JPEG_QUALITY
+                int "Default sensor JPEG quality (?q=, 4-63, lower is better)"
+                default 12
+                range 4 63
+        endif
     endif
 endmenu
 

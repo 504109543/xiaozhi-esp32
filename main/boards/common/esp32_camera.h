@@ -37,6 +37,12 @@ public:
         int64_t encode_us = 0;   // JPEG encoding, camera lock released
     };
 
+    // Sensor JPEG settings used while an MJPEG stream is running
+    struct StreamParams {
+        framesize_t frame_size = FRAMESIZE_QVGA;
+        int jpeg_quality = 12;  // Sensor JPEG quality, 0-63, lower is better
+    };
+
     enum class SnapshotError {
         kNotReady,       // Camera driver failed to initialize
         kBusy,           // AI capture pending or camera in use
@@ -69,10 +75,17 @@ private:
     uint16_t frame_height_ = 0;
     pixformat_t frame_format_ = PIXFORMAT_RGB565;
     bool has_frame_ = false;
+    // At most one MJPEG stream; while set, snapshots back off and the idle timer leaves the
+    // driver alone. AI capture still takes priority and switches the driver back to config_.
+    std::atomic<bool> stream_active_{false};
+    bool driver_stream_mode_ = false;  // Driver was started with stream settings, not config_
+    StreamParams driver_stream_params_;
 
     camera_fb_t* GrabLatestFrame();
     // Caller must hold fb_mutex_
     bool StartLocked();
+    bool StartStreamLocked(const StreamParams& params);
+    bool InitDriverLocked(const camera_config_t& config);
     void StopLocked();
     void ApplySensorSettings();
     void ArmIdleStop();
@@ -92,4 +105,12 @@ public:
     // Grab a fresh frame and encode it to JPEG without touching the AI capture buffers.
     // Never blocks waiting for the camera: returns kBusy while an AI capture is pending.
     std::expected<JpegSnapshot, SnapshotError> CaptureSnapshotJpeg(uint8_t quality);
+
+    // MJPEG streaming. BeginStream() claims the single stream slot. CaptureStreamJpeg() runs the
+    // driver in sensor JPEG mode and returns a copy of the latest frame; it returns kBusy instead
+    // of waiting while an AI capture is pending. EndStream() stops (or, without on-demand mode,
+    // restores) the driver.
+    bool BeginStream();
+    std::expected<JpegSnapshot, SnapshotError> CaptureStreamJpeg(const StreamParams& params);
+    void EndStream();
 };

@@ -3,6 +3,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <img_converters.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -33,6 +34,7 @@ static constexpr bool kConfiguredVFlip = false;
 
 #if !CONFIG_XIAOZHI_CAMERA_ON_DEMAND
 #define CONFIG_XIAOZHI_CAMERA_IDLE_STOP_MS 0
+#define CONFIG_XIAOZHI_CAMERA_WARMUP_FRAMES 3
 #endif
 
 // Bytes of pixel data in a frame buffer
@@ -138,12 +140,46 @@ Esp32Camera::~Esp32Camera() {
     has_frame_ = false;
 }
 
+// Start the driver with the board configuration used for AI capture and snapshots
 bool Esp32Camera::StartLocked() {
-    if (streaming_on_) {
+    if (streaming_on_ && !driver_stream_mode_) {
         return true;
     }
+    // A running stream configuration is replaced, the stream restarts it on its next frame
+    StopLocked();
+    return InitDriverLocked(config_);
+}
+
+// Start the driver in sensor JPEG mode for MJPEG streaming
+bool Esp32Camera::StartStreamLocked(const StreamParams& params) {
+    if (streaming_on_ && driver_stream_mode_ &&
+        driver_stream_params_.frame_size == params.frame_size &&
+        driver_stream_params_.jpeg_quality == params.jpeg_quality) {
+        return true;
+    }
+    StopLocked();
+
+    camera_config_t config = config_;
+    config.pixel_format = PIXFORMAT_JPEG;
+    config.frame_size = params.frame_size;
+    config.jpeg_quality = params.jpeg_quality;
+    config.fb_count = 2;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.grab_mode = CAMERA_GRAB_LATEST;
+    // The driver default (width * height / 5) is tight for detailed scenes at low quality values
+    size_t pixels = (size_t)resolution[params.frame_size].width * resolution[params.frame_size].height;
+    config.jpeg_buffer_size = std::max<size_t>(pixels / 3, 32 * 1024);
+    if (!InitDriverLocked(config)) {
+        return false;
+    }
+    driver_stream_mode_ = true;
+    driver_stream_params_ = params;
+    return true;
+}
+
+bool Esp32Camera::InitDriverLocked(const camera_config_t& config) {
     int64_t start_time = esp_timer_get_time();
-    esp_err_t err = esp_camera_init(&config_);
+    esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_camera_init failed with error 0x%x", err);
         return false;
@@ -151,9 +187,13 @@ bool Esp32Camera::StartLocked() {
     streaming_on_ = true;
     ApplySensorSettings();
 
+    // Let auto exposure and white balance settle on a freshly started sensor. Without on-demand
+    // mode the AI driver starts once at boot and needs no warm-up, a stream always does.
+    bool warmup = config.pixel_format == PIXFORMAT_JPEG && config.pixel_format != config_.pixel_format;
 #if CONFIG_XIAOZHI_CAMERA_ON_DEMAND
-    // Let auto exposure and white balance settle on a freshly started sensor
-    if (available_) {
+    warmup = available_;
+#endif
+    if (warmup) {
         for (int i = 0; i < CONFIG_XIAOZHI_CAMERA_WARMUP_FRAMES; i++) {
             camera_fb_t* fb = esp_camera_fb_get();
             if (!fb) {
@@ -164,8 +204,8 @@ bool Esp32Camera::StartLocked() {
             esp_camera_fb_return(fb);
         }
     }
-#endif
-    ESP_LOGI(TAG, "Camera started: format=%d, start time: %d ms", config_.pixel_format,
+    ESP_LOGI(TAG, "Camera started: format=%d, frame size=%d, start time: %d ms",
+             config.pixel_format, config.frame_size,
              int((esp_timer_get_time() - start_time) / 1000));
     return true;
 }
@@ -176,6 +216,7 @@ void Esp32Camera::StopLocked() {
     }
     esp_camera_deinit();
     streaming_on_ = false;
+    driver_stream_mode_ = false;
     ESP_LOGI(TAG, "Camera stopped");
 }
 
@@ -214,6 +255,10 @@ void Esp32Camera::StopIfIdle() {
     std::unique_lock<std::mutex> lock(fb_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
         // A capture is in progress, it re-arms or stops the driver itself
+        return;
+    }
+    if (stream_active_.load()) {
+        // EndStream() stops the driver when the stream finishes
         return;
     }
     int64_t idle_us = esp_timer_get_time() - last_use_us_;
@@ -562,8 +607,9 @@ std::expected<Esp32Camera::JpegSnapshot, Esp32Camera::SnapshotError> Esp32Camera
     if (!available_) {
         return std::unexpected(SnapshotError::kNotReady);
     }
-    // Never make an AI capture wait behind a snapshot that has not started yet
-    if (ai_capture_waiters_.load() > 0) {
+    // Never make an AI capture wait behind a snapshot that has not started yet. A running
+    // stream would have to restart its driver configuration, so snapshots wait for it too.
+    if (ai_capture_waiters_.load() > 0 || stream_active_.load()) {
         return std::unexpected(SnapshotError::kBusy);
     }
     std::unique_lock<std::mutex> lock(fb_mutex_, std::try_to_lock);
@@ -636,4 +682,74 @@ std::expected<Esp32Camera::JpegSnapshot, Esp32Camera::SnapshotError> Esp32Camera
     snapshot.len = jpeg_len;
     snapshot.encode_us = esp_timer_get_time() - copied_time;
     return snapshot;
+}
+
+bool Esp32Camera::BeginStream() {
+    if (!available_) {
+        return false;
+    }
+    bool expected = false;
+    return stream_active_.compare_exchange_strong(expected, true);
+}
+
+std::expected<Esp32Camera::JpegSnapshot, Esp32Camera::SnapshotError> Esp32Camera::CaptureStreamJpeg(
+    const StreamParams& params) {
+    if (!available_) {
+        return std::unexpected(SnapshotError::kNotReady);
+    }
+    // Yield to AI capture: the stream pauses and restarts its driver configuration afterwards
+    if (ai_capture_waiters_.load() > 0) {
+        return std::unexpected(SnapshotError::kBusy);
+    }
+    std::unique_lock<std::mutex> lock(fb_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return std::unexpected(SnapshotError::kBusy);
+    }
+
+    int64_t start_time = esp_timer_get_time();
+    if (!StartStreamLocked(params)) {
+        return std::unexpected(SnapshotError::kCaptureFailed);
+    }
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (!fb) {
+        ESP_LOGE(TAG, "Stream capture failed");
+        return std::unexpected(SnapshotError::kCaptureFailed);
+    }
+    if (fb->format != PIXFORMAT_JPEG || fb->len == 0) {
+        ESP_LOGE(TAG, "Stream frame is not JPEG: format=%d len=%zu", fb->format, fb->len);
+        esp_camera_fb_return(fb);
+        return std::unexpected(SnapshotError::kCaptureFailed);
+    }
+
+    // Copy so the frame buffer goes back to the driver before the network send
+    JpegSnapshot snapshot;
+    snapshot.width = fb->width;
+    snapshot.height = fb->height;
+    snapshot.len = fb->len;
+    snapshot.data.reset((uint8_t*)heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!snapshot.data) {
+        esp_camera_fb_return(fb);
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for stream frame", snapshot.len);
+        return std::unexpected(SnapshotError::kNoMemory);
+    }
+    memcpy(snapshot.data.get(), fb->buf, fb->len);
+    esp_camera_fb_return(fb);
+    last_use_us_ = esp_timer_get_time();
+    lock.unlock();
+
+    snapshot.capture_us = last_use_us_ - start_time;
+    return snapshot;
+}
+
+void Esp32Camera::EndStream() {
+    std::lock_guard<std::mutex> lock(fb_mutex_);
+    stream_active_.store(false);
+    if (!driver_stream_mode_) {
+        return;
+    }
+    StopLocked();
+#if !CONFIG_XIAOZHI_CAMERA_ON_DEMAND
+    // Without on-demand mode the AI capture configuration is expected to be running
+    StartLocked();
+#endif
 }

@@ -5,7 +5,7 @@ on:
     branches:
       - ryan-cam-test
       - ryan-cam-snapshot
-      - ryan-cam-ondemand
+      - ryan-cam-stream
   workflow_dispatch:
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
           # Stage 1 only: frame buffer lifecycle fix, /snapshot disabled (default config)
           - config: config.json
             artifact: stage1-bread-compact-wifi
-          # Stage 1 + 2: /snapshot enabled on port 8080
+          # Camera HTTP server on port 8080: /snapshot and /stream
           - config: config.snapshot-test.json
             artifact: http-bread-compact-wifi
 
