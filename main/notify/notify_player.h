@@ -8,6 +8,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "audio_service.h"
@@ -25,8 +26,11 @@ public:
     explicit NotifyPlayer(AudioService& audio_service);
     ~NotifyPlayer();
 
+    // Playback order: local_audio, then audio_url (optional), then local_tail_audio
+    // (optional). All embedded flash storage; never request-owned.
     bool Start(std::string audio_url, std::vector<NotifySubtitle> subtitles, uint32_t playback_id,
-               SubtitleCallback subtitle_callback, FinishedCallback finished_callback);
+               SubtitleCallback subtitle_callback, FinishedCallback finished_callback,
+               std::string_view local_audio = {}, std::string_view local_tail_audio = {});
     void Stop();
     void OnPlaybackProgress(uint32_t playback_id, uint32_t media_position_ms);
     void OnPlaybackDrained();
@@ -37,6 +41,8 @@ private:
     AudioService& audio_service_;
     mutable std::mutex mutex_;
     std::string audio_url_;
+    std::string_view local_audio_;  // Immutable embedded flash storage; never request-owned.
+    std::string_view local_tail_audio_;
     std::vector<NotifySubtitle> subtitles_;
     std::string displayed_text_;
     SubtitleCallback subtitle_callback_;
@@ -56,6 +62,7 @@ private:
 
     static void WorkerEntry(void* arg);
     void WorkerTask();
+    bool PlayLocal(std::string_view audio, uint32_t playback_id, uint32_t& position_ms);
     bool IsCancelled(uint32_t playback_id) const;
     FinishedCallback CompleteLocked(uint32_t& playback_id);
 };

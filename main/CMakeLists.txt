@@ -1096,8 +1096,13 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
         sdmmc
     )
 endif()
+set(GATE_GREETING_SOUNDS "")
+if(CONFIG_XIAOZHI_GATE_GREETING)
+    list(APPEND GATE_GREETING_SOUNDS "assets/gate_hello.ogg" "assets/gate_prompt.ogg")
+endif()
+
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${GATE_GREETING_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES

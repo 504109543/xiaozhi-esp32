@@ -1179,6 +1179,14 @@ menu "Camera Configuration"
                 (namespace camera, key http_token) and printed to the serial log at boot.
                 A value set here is compiled into the firmware, do not commit a real token.
 
+        config XIAOZHI_GATE_GREETING
+            bool "Local fixed door greeting (/greet and /status)"
+            default n
+            help
+                Add authenticated local HTTP control on the camera server for a fixed
+                embedded greeting. Uses the existing notification player while idle;
+                does not open a voice session or enable microphone upload.
+
         menuconfig XIAOZHI_CAMERA_STREAM
             bool "Enable MJPEG Stream (/stream)"
             default y

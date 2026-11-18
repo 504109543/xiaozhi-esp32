@@ -30,6 +30,12 @@ private:
     static esp_err_t HandleStream(httpd_req_t* req);
     static void StreamTask(void* arg);
 #endif
+#if CONFIG_XIAOZHI_GATE_GREETING
+    static esp_err_t HandleGreeting(httpd_req_t* req);
+    static esp_err_t HandleSay(httpd_req_t* req);
+    static esp_err_t HandleStatus(httpd_req_t* req);
+    static esp_err_t HandleOta(httpd_req_t* req);
+#endif
     void LoadToken();
     bool CheckToken(httpd_req_t* req);
 

@@ -24,7 +24,10 @@ public:
     bool HasActivationCode() { return has_activation_code_; }
     bool HasServerTime() { return has_server_time_; }
     bool StartUpgrade(std::function<void(int progress, size_t speed)> callback);
-    static bool Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback);
+    // expected_sha256 (64 lowercase hex) and expected_size are optional; when given, the
+    // image is rejected before switching the boot partition unless both match the download.
+    static bool Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback,
+                        const std::string& expected_sha256 = {}, size_t expected_size = 0);
     void MarkCurrentVersionValid();
 
     const std::string& GetFirmwareVersion() const { return firmware_version_; }

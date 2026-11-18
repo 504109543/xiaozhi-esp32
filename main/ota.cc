@@ -13,6 +13,7 @@
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
+#include <psa/crypto.h>
 #ifdef SOC_HMAC_SUPPORTED
 #include <esp_hmac.h>
 #endif
@@ -269,8 +270,22 @@ void Ota::MarkCurrentVersionValid() {
     }
 }
 
-bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback) {
+bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback,
+                  const std::string& expected_sha256, size_t expected_size) {
     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
+    const bool verify = !expected_sha256.empty();
+    psa_hash_operation_t hash = PSA_HASH_OPERATION_INIT;
+    if (verify && (expected_sha256.size() != 64 || expected_size == 0 ||
+                   psa_crypto_init() != PSA_SUCCESS ||
+                   psa_hash_setup(&hash, PSA_ALG_SHA_256) != PSA_SUCCESS)) {
+        ESP_LOGE(TAG, "Failed to prepare firmware digest check");
+        return false;
+    }
+    // Every early return below must release the hash operation.
+    struct HashGuard {
+        psa_hash_operation_t* op;
+        ~HashGuard() { psa_hash_abort(op); }
+    } hash_guard{&hash};
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
     if (update_partition == NULL) {
@@ -304,6 +319,10 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
         ESP_LOGE(TAG, "Failed to get content length");
         return false;
     }
+    if (verify && (content_length != expected_size || content_length > update_partition->size)) {
+        ESP_LOGE(TAG, "Firmware size %u does not match expected %u", content_length, expected_size);
+        return false;
+    }
 
     constexpr size_t PAGE_SIZE = 4096;
     char* buffer = (char*)heap_caps_malloc(PAGE_SIZE, MALLOC_CAP_INTERNAL);
@@ -323,6 +342,16 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
             return false;
         }
         int n = *ret;
+        if (verify && n > 0 &&
+            psa_hash_update(&hash, reinterpret_cast<const uint8_t*>(buffer + buffer_offset), n) !=
+                PSA_SUCCESS) {
+            ESP_LOGE(TAG, "Firmware digest update failed");
+            if (image_header_checked) {
+                esp_ota_abort(update_handle);
+            }
+            heap_caps_free(buffer);
+            return false;
+        }
 
         // Calculate speed and progress every second
         recent_read += n;
@@ -376,6 +405,25 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     }
     http->Close();
     heap_caps_free(buffer);
+
+    if (verify) {
+        uint8_t digest[32];
+        size_t digest_length = 0;
+        char hex[65];
+        bool matched = total_read == expected_size &&
+                       psa_hash_finish(&hash, digest, sizeof(digest), &digest_length) == PSA_SUCCESS &&
+                       digest_length == sizeof(digest);
+        for (size_t i = 0; matched && i < sizeof(digest); ++i) {
+            snprintf(hex + i * 2, 3, "%02x", digest[i]);
+        }
+        if (!matched || expected_sha256 != std::string(hex, 64)) {
+            ESP_LOGE(TAG, "Firmware digest or size mismatch; keeping the running app");
+            if (image_header_checked) {
+                esp_ota_abort(update_handle);
+            }
+            return false;
+        }
+    }
 
     esp_err_t err = esp_ota_end(update_handle);
     if (err != ESP_OK) {

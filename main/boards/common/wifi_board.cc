@@ -160,6 +160,11 @@ void WifiBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
 }
 
 void WifiBoard::OnWifiConnectTimeout(void* arg) {
+#if CONFIG_XIAOZHI_GATE_GREETING
+    // Keep the existing station retry loop alive during a long AP outage.
+    ESP_LOGW(TAG, "Gate WiFi startup timeout; continuing automatic retries");
+    return;
+#endif
     auto* board = static_cast<WifiBoard*>(arg);
     ESP_LOGW(TAG, "WiFi connection timeout, entering config mode");
 

@@ -20,6 +20,9 @@
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "notify/notify_player.h"
+#if CONFIG_XIAOZHI_GATE_GREETING
+#include "notify/gate_greeting_guard.h"
+#endif
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -108,9 +111,17 @@ public:
      */
     void StopListening();
 
+#if CONFIG_XIAOZHI_GATE_GREETING
+    GateGreetingGuard::Result RequestGateGreeting(const std::string& event_id, int64_t deadline_ms,
+                                                 const std::string& weather_url = {});
+    // Main task only. Opens a voice session and sends `text` to the server as if
+    // the user had said it. Accepted only when idle and before deadline_ms.
+    bool RequestRemoteText(const std::string& text, int64_t deadline_ms);
+#endif
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
-    bool UpgradeFirmware(const std::string& url, const std::string& version = "");
+    bool UpgradeFirmware(const std::string& url, const std::string& version = "",
+                         const std::string& expected_sha256 = {}, size_t expected_size = 0);
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
     void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
@@ -142,6 +153,10 @@ private:
     AudioService audio_service_;
     NotifyPlayer notify_player_;
     uint32_t notification_playback_id_ = 0;
+#if CONFIG_XIAOZHI_GATE_GREETING
+    GateGreetingGuard gate_greeting_guard_;
+#endif
+    bool gate_greeting_auto_listen_ = false;
     std::unique_ptr<Ota> ota_;
 
     std::function<void(const std::string&)> mcp_broadcast_callback_;
@@ -167,9 +182,15 @@ private:
     void ContinueOpenAudioChannel(ListeningMode mode);
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void BeginConversationWithoutWakeWord();
+#if CONFIG_XIAOZHI_GATE_GREETING
+    void ContinueRemoteText(const std::string& text);
+#endif
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
-    void StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles);
+    bool StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles,
+                           std::string_view local_audio = {},
+                           std::string_view local_tail_audio = {});
     void StopNotification();
     void HandleNotificationFinished(uint32_t playback_id, bool success);
 

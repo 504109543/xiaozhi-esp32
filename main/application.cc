@@ -72,6 +72,17 @@ void Application::Initialize() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
     audio_service_.Start();
+#if CONFIG_XIAOZHI_GATE_GREETING
+    // Ryan asked for full volume at the gate (large space). Apply once and persist,
+    // so a later voice/button change is not overridden on every reboot.
+    {
+        Settings gate_settings("gate", true);
+        if (gate_settings.GetInt("volume_full_v1", 0) == 0) {
+            codec->SetOutputVolume(100);
+            gate_settings.SetInt("volume_full_v1", 1);
+        }
+    }
+#endif
     ESP_LOGI(TAG, "After board/audio init");
     SystemInfo::PrintHeapStats();
 
@@ -1098,10 +1109,12 @@ void Application::ConfigureWakeWordForListening() {
 #endif
 }
 
-void Application::StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles) {
+bool Application::StartNotification(std::string audio_url, std::vector<NotifySubtitle> subtitles,
+                                    std::string_view local_audio,
+                                    std::string_view local_tail_audio) {
     if (GetDeviceState() != kDeviceStateIdle || notify_player_.IsBusy()) {
         ESP_LOGW(TAG, "Ignoring notify message while device is busy");
-        return;
+        return false;
     }
 
     auto& board = Board::GetInstance();
@@ -1115,7 +1128,7 @@ void Application::StartNotification(std::string audio_url, std::vector<NotifySub
 
     if (!SetDeviceState(kDeviceStateNotifying)) {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        return;
+        return false;
     }
 
     audio_service_.ResetDecoder();
@@ -1123,7 +1136,9 @@ void Application::StartNotification(std::string audio_url, std::vector<NotifySub
     if (playback_id == 0) {
         playback_id = ++notification_playback_id_;
     }
-    audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+    if (local_audio.empty()) {
+        audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+    }
 
     bool started = notify_player_.Start(
         std::move(audio_url), std::move(subtitles), playback_id,
@@ -1136,15 +1151,73 @@ void Application::StartNotification(std::string audio_url, std::vector<NotifySub
         },
         [this](uint32_t id, bool success) {
             Schedule([this, id, success]() { HandleNotificationFinished(id, success); });
-        });
+        },
+        local_audio, local_tail_audio);
 
     if (!started) {
         ESP_LOGE(TAG, "Failed to start notification playback");
         StopNotification();
     }
+    return started;
 }
 
+#if CONFIG_XIAOZHI_GATE_GREETING
+GateGreetingGuard::Result Application::RequestGateGreeting(const std::string& event_id,
+                                                           int64_t deadline_ms,
+                                                           const std::string& weather_url) {
+    extern const char gate_start[] asm("_binary_gate_hello_ogg_start");
+    extern const char gate_end[] asm("_binary_gate_hello_ogg_end");
+    extern const char gate_prompt_start[] asm("_binary_gate_prompt_ogg_start");
+    extern const char gate_prompt_end[] asm("_binary_gate_prompt_ogg_end");
+    if (!weather_url.empty() && !GateGreetingGuard::ValidWeatherUrl(weather_url)) {
+        return GateGreetingGuard::Result::Invalid;
+    }
+    auto result = gate_greeting_guard_.Try(
+        event_id, esp_timer_get_time() / 1000, deadline_ms, [this, &weather_url]() {
+            return StartNotification(
+                weather_url, {{0, "嗨，你好呀～"}},
+                std::string_view(gate_start, gate_end - gate_start),
+                std::string_view(gate_prompt_start, gate_prompt_end - gate_prompt_start));
+        });
+    // Only an accepted greeting will reach HandleNotificationFinished with this set.
+    gate_greeting_auto_listen_ = result == GateGreetingGuard::Result::Accepted;
+    return result;
+}
+
+bool Application::RequestRemoteText(const std::string& text, int64_t deadline_ms) {
+    if (!protocol_ || GetDeviceState() != kDeviceStateIdle ||
+        esp_timer_get_time() / 1000 > deadline_ms) {
+        return false;
+    }
+    if (!SetDeviceState(kDeviceStateConnecting)) {
+        return false;
+    }
+    // Let the state change reach the UI first; OpenAudioChannel may block ~1 s.
+    Schedule([this, text]() { ContinueRemoteText(text); });
+    return true;
+}
+
+void Application::ContinueRemoteText(const std::string& text) {
+    if (GetDeviceState() != kDeviceStateConnecting) {
+        return;
+    }
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    if (!protocol_->IsAudioChannelOpened() && !protocol_->OpenAudioChannel()) {
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+    ESP_LOGI(TAG, "Remote text: %s", text.c_str());
+    // Same message as a detected wake word; the server treats non-wake-word
+    // text as user input. No wake word audio is sent.
+    protocol_->SendWakeWordDetected(text);
+    SetListeningMode(GetDefaultListeningMode());
+}
+#endif
+
 void Application::StopNotification() {
+    // Any stop (completion, wake word, button, reboot) cancels a pending
+    // auto-listen; HandleNotificationFinished captures the flag before this.
+    gate_greeting_auto_listen_ = false;
     notify_player_.Stop();
     audio_service_.ResetDecoder();
     auto& board = Board::GetInstance();
@@ -1161,7 +1234,28 @@ void Application::HandleNotificationFinished(uint32_t playback_id, bool success)
     }
     ESP_LOGI(TAG, "Notification playback %lu %s", static_cast<unsigned long>(playback_id),
              success ? "completed" : "failed");
+    bool auto_listen = gate_greeting_auto_listen_;
     StopNotification();
+    if (success && auto_listen) {
+        // The fixed greeting ended with a spoken prompt; open the voice session
+        // directly so the reply needs no wake word.
+        BeginConversationWithoutWakeWord();
+    }
+}
+
+void Application::BeginConversationWithoutWakeWord() {
+    if (!protocol_ || GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+    ListeningMode mode = GetDefaultListeningMode();
+    if (!SetDeviceState(kDeviceStateConnecting)) {
+        return;
+    }
+    if (!protocol_->IsAudioChannelOpened()) {
+        Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
+        return;
+    }
+    SetListeningMode(mode);
 }
 
 void Application::Schedule(std::function<void()>&& callback) {
@@ -1205,7 +1299,8 @@ void Application::Reboot() {
     esp_restart();
 }
 
-bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
+bool Application::UpgradeFirmware(const std::string& url, const std::string& version,
+                                  const std::string& expected_sha256, size_t expected_size) {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
 
@@ -1242,7 +1337,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         Schedule([display, message = std::string(buffer)]() {
             display->SetChatMessage("system", message.c_str());
         });
-    });
+    }, expected_sha256, expected_size);
 
     if (!upgrade_success) {
         // Upgrade failed, restart audio service and continue running
@@ -1298,6 +1393,10 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 }
 
 bool Application::CanEnterSleepMode() {
+#if CONFIG_XIAOZHI_GATE_GREETING
+    // Mains-powered gate control must remain reachable without a voice session.
+    return false;
+#endif
     if (GetDeviceState() != kDeviceStateIdle) {
         return false;
     }
